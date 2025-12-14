@@ -1,0 +1,320 @@
+# Z Notation Formal Specifications for Go Architectural Analysis Algorithms
+
+This document provides formal Z notation specifications for key algorithms discussed in the Go architectural analysis research, including complexity measurements, concurrency pattern detection, and architectural smell identification.
+
+## 1. Cyclomatic Complexity Calculation
+
+The cyclomatic complexity metric measures the number of linearly independent paths through a program's source code.
+
+### Basic Types and Sets
+```
+[CONTROL_NODE, DECISION_NODE, EXIT_NODE]
+PATH ≜ seq CONTROL_NODE
+CONTROL_GRAPH ≜ CONTROL_NODE ⇸ ℙ CONTROL_NODE
+```
+
+### Cyclomatic Complexity Schema
+```
+│ CyclomaticComplexity
+├─────────────
+│ graph : CONTROL_GRAPH
+│ start : CONTROL_NODE
+│ exits : ℙ EXIT_NODE
+├─────────────
+│ ∀ n : dom graph • n ∈ CONTROL_NODE
+│ start ∈ dom graph
+│ exits ⊆ ran graph
+│ ∃ p : PATH • first p = start ∧ last p ∈ exits
+├─────────────
+│ complexity = (#(dom graph ∪ ran graph)) - (#(dom graph)) + 2
+```
+
+### Decision Node Classification
+```
+│ ClassifyNode
+├─────────────
+│ node : CONTROL_NODE
+│ code : seq CHAR
+├─────────────
+│ is_decision ≜ node ∈ DECISION_NODE ⇔
+│   (∃ if_keyword : "if" ∈ code) ∨
+│   (∃ for_keyword : "for" ∈ code) ∨
+│   (∃ switch_keyword : "switch" ∈ code) ∨
+│   (∃ select_keyword : "select" ∈ code)
+```
+
+## 2. Cognitive Complexity Calculation
+
+Cognitive complexity measures how difficult code is for humans to understand, penalizing nesting and branching more heavily than cyclomatic complexity.
+
+### Cognitive Weight Types
+```
+NESTING_LEVEL ≜ ℕ
+COGNITIVE_WEIGHT ≜ ℕ
+STRUCTURE_TYPE ::= if_statement | switch_statement | for_loop | select_statement | function_call
+```
+
+### Cognitive Complexity Schema
+```
+│ CognitiveComplexity
+├─────────────
+│ code_block : seq CHAR
+│ nesting : NESTING_LEVEL
+├─────────────
+│ base_complexity : ℕ
+│ nesting_penalty : ℕ
+│ structural_increment : ℕ
+├─────────────
+│ base_complexity = #(structural_elements ∩ {if_statement, switch_statement, for_loop})
+│ nesting_penalty = nesting × 1  ⦁ if nesting > 0 else 0
+│ structural_increment = 1 + nesting_penalty
+│ complexity = base_complexity + structural_increment
+```
+
+### Structure Recognition
+```
+│ RecognizeStructure
+├─────────────
+│ code : seq CHAR
+│ current_nesting : NESTING_LEVEL
+├─────────────
+│ structure : STRUCTURE_TYPE
+│ weight : COGNITIVE_WEIGHT
+├─────────────
+│ structure ∈ {if_statement, switch_statement, for_loop, select_statement}
+│ weight = 1 + current_nesting
+```
+
+## 3. Goroutine Leak Detection Pattern Analysis
+
+Formal specification for detecting goroutine leak patterns based on channel operations and control flow.
+
+### Goroutine State Types
+```
+GOROUTINE_STATE ::= running | blocked | leaked
+CHANNEL_OPERATION ::= send | receive | close
+LEAK_PATTERN ::= channel_receive_leak | select_statement_leak | channel_send_leak
+```
+
+### Goroutine Lifecycle Schema
+```
+│ GoroutineLifecycle
+├─────────────
+│ goroutine_id : ℕ
+│ start_context : CONTEXT
+│ operations : seq CHANNEL_OPERATION
+│ termination_condition : ℙ CONDITION
+├─────────────
+│ state : GOROUTINE_STATE
+│ leak_detected : 𝔹
+├─────────────
+│ leak_detected ⇔
+│   (∃ receive_op : receive ∈ operations ∧ ¬(close ∈ operations)) ∨
+│   (∃ select_op : select_statement ∈ operations ∧ ¬escape_hatch ∈ termination_condition) ∨
+│   (∃ send_op : send ∈ operations ∧ premature_return ∈ termination_condition)
+```
+
+### Leak Pattern Classification
+```
+│ ClassifyLeakPattern
+├─────────────
+│ operations : seq CHANNEL_OPERATION
+│ control_flow : seq CONDITION
+├─────────────
+│ pattern : LEAK_PATTERN
+│ confidence : ℝ
+├─────────────
+│ pattern = channel_receive_leak ⇔
+│   #(filter operations receive) > 0 ∧ ¬(close ∈ operations)
+│ confidence = 0.42  ⦁ if unclosed_channel ∈ control_flow else 0.44
+│
+│ pattern = select_statement_leak ⇔
+│   select_statement ∈ operations ∧ ¬(context_cancel ∈ control_flow ∨ timeout ∈ control_flow)
+│ confidence = 0.86
+│
+│ pattern = channel_send_leak ⇔
+│   send ∈ operations ∧ (premature_return ∈ control_flow ∨ double_send ∈ control_flow)
+│ confidence = 0.57  ⦁ if premature_return ∈ control_flow else 0.03
+```
+
+## 4. Interface Pollution Detection
+
+Algorithm for detecting interfaces that violate Go's interface design principles.
+
+### Interface Analysis Types
+```
+INTERFACE_METHOD ≜ seq CHAR
+CONCRETE_TYPE ≜ seq CHAR
+INTERFACE_SIZE ≜ ℕ
+COUPLING_STRENGTH ≜ ℝ
+```
+
+### Interface Pollution Schema
+```
+│ InterfacePollution
+├─────────────
+│ interface_def : seq INTERFACE_METHOD
+│ concrete_impls : ℙ CONCRETE_TYPE
+│ usage_patterns : ℙ (INTERFACE_METHOD × ℕ)
+├─────────────
+│ size : INTERFACE_SIZE
+│ abstraction_strength : ℝ
+│ pollution_score : ℝ
+├─────────────
+│ size = #(interface_def)
+│ abstraction_strength = 1.0 / size  ⦁ if size > 0 else 0.0
+│ pollution_score = size / #(concrete_impls)  ⦁ if #(concrete_impls) > 0 else ∞
+├─────────────
+│ is_polluted ≜ pollution_score > 5 ∨ size > 7 ∨ abstraction_strength < 0.2
+```
+
+### Interface Coupling Analysis
+```
+│ AnalyzeInterfaceCoupling
+├─────────────
+│ interface_methods : ℙ INTERFACE_METHOD
+│ consumer_usage : ℙ (INTERFACE_METHOD × ℕ)
+│ producer_definitions : ℙ INTERFACE_METHOD
+├─────────────
+│ coupling_type : COUPLING_STRENGTH
+│ design_pattern : seq CHAR
+├─────────────
+│ coupling_type = #(interface_methods ∩ producer_definitions) / #(interface_methods)
+│ design_pattern = "accept_interfaces_return_structs" ⇔
+│   ∀ method : interface_methods • method ∈ consumer_usage
+│ design_pattern = "interface_pollution" ⇔
+│   #(interface_methods) = #(producer_definitions) ∧ coupling_type = 1.0
+```
+
+## 5. Concurrency Bug Pattern Matching
+
+Formal specification for detecting concurrency anti-patterns in Go code.
+
+### Concurrency Bug Types
+```
+BUG_TYPE ::= blocking_bug | non_blocking_bug | race_condition
+BLOCKING_CAUSE ::= channel_misuse | shared_memory_sync | deadlock
+RACE_PATTERN ::= unprotected_shared_access | message_passing_race
+```
+
+### Bug Detection Schema
+```
+│ DetectConcurrencyBugs
+├─────────────
+│ code_patterns : ℙ CODE_PATTERN
+│ execution_traces : ℙ EXECUTION_TRACE
+│ static_analysis : STATIC_ANALYSIS_RESULT
+├─────────────
+│ detected_bugs : ℙ BUG_TYPE
+│ false_positive_rate : ℝ
+│ detection_precision : ℝ
+├─────────────
+│ blocking_channel_bugs = {bug ∈ detected_bugs |
+│   bug.cause = channel_misuse ∧ #(filter execution_traces blocked_on_channel) > 0}
+│
+│ shared_memory_bugs = {bug ∈ detected_bugs |
+│   bug.cause = shared_memory_sync ∧ #(filter execution_traces mutex_contention) > 0}
+│
+│ detection_precision = #(true_positives) / (#(true_positives) + #(false_positives))
+│ false_positive_rate = #(false_positives) / (#(false_positives) + #(true_negatives))
+├─────────────
+│ channel_bug_prevalence ≜ #(blocking_channel_bugs) / #(detected_bugs) = 0.58
+│ shared_memory_prevalence ≜ #(shared_memory_bugs) / #(detected_bugs) = 0.42
+```
+
+### Race Condition Detection
+```
+│ RaceConditionDetection
+├─────────────
+│ shared_variables : ℙ VARIABLE
+│ access_patterns : ℙ (VARIABLE × ACCESS_TYPE × GOROUTINE_ID)
+│ synchronization_primitives : ℙ SYNC_PRIMITIVE
+├─────────────
+│ race_conditions : ℙ RACE_CONDITION
+│ unprotected_accesses : ℙ (VARIABLE × GOROUTINE_ID)
+├─────────────
+│ unprotected_accesses = { (var, goroutine) ∈ access_patterns |
+│   ¬∃ sync ∈ synchronization_primitives • protects(sync, var, goroutine) }
+│
+│ race_conditions = { race ∈ unprotected_accesses × unprotected_accesses |
+│   race.1.var = race.2.var ∧ race.1.access = write ∨ race.2.access = write ∧
+│   race.1.goroutine ≠ race.2.goroutine }
+```
+
+## 6. Architectural Complexity Threshold Analysis
+
+Formal specification for evaluating code against architectural quality thresholds.
+
+### Complexity Metrics
+```
+COMPLEXITY_METRIC ::= cyclomatic | cognitive | lines_of_code | nesting_depth
+THRESHOLD_LEVEL ::= academic | tool_default | go_adjusted
+QUALITY_GRADE ::= excellent | good | acceptable | concerning | critical
+```
+
+### Threshold Evaluation Schema
+```
+│ EvaluateComplexityThresholds
+├─────────────
+│ metrics : COMPLEXITY_METRIC ⇸ ℕ
+│ threshold_level : THRESHOLD_LEVEL
+│ language_adjustments : LANGUAGE_ADJUSTMENTS
+├─────────────
+│ evaluation : COMPLEXITY_METRIC ⇸ QUALITY_GRADE
+│ overall_assessment : QUALITY_GRADE
+├─────────────
+│ ∀ metric : dom metrics •
+│   evaluation(metric) = excellent ⇔ metrics(metric) ≤ get_threshold(metric, threshold_level, language_adjustments)
+│   evaluation(metric) = good ⇔ metrics(metric) ≤ get_threshold(metric, threshold_level, language_adjustments) × 1.2
+│   evaluation(metric) = acceptable ⇔ metrics(metric) ≤ get_threshold(metric, threshold_level, language_adjustments) × 1.5
+│   evaluation(metric) = concerning ⇔ metrics(metric) ≤ get_threshold(metric, threshold_level, language_adjustments) × 2.0
+│   evaluation(metric) = critical ⇔ metrics(metric) > get_threshold(metric, threshold_level, language_adjustments) × 2.0
+├─────────────
+│ overall_assessment = worst_grade(evaluation)
+```
+
+### Go-Specific Adjustments
+```
+│ GoLanguageAdjustments
+├─────────────
+│ base_thresholds : THRESHOLD_LEVEL ⇸ COMPLEXITY_METRIC ⇸ ℕ
+├─────────────
+│ go_adjusted_thresholds : THRESHOLD_LEVEL ⇸ COMPLEXITY_METRIC ⇸ ℕ
+├─────────────
+│ go_adjusted_thresholds = base_thresholds ⊕
+│   {(cyclomatic, academic) ↦ 10..15,
+│    (cognitive, tool_default) ↦ 15..20,
+│    (lines_of_code, go_adjusted) ↦ 60..100,
+│    (nesting_depth, go_adjusted) ↦ 3..4}
+```
+
+## 7. Static Analysis Tool Integration
+
+Formal specification for integrating multiple static analysis tools with weighted aggregation.
+
+### Tool Integration Schema
+```
+│ StaticAnalysisIntegration
+├─────────────
+│ tools : ℙ ANALYSIS_TOOL
+│ tool_weights : ANALYSIS_TOOL ⇸ ℝ
+│ tool_results : ANALYSIS_TOOL ⇸ ANALYSIS_RESULT
+│ aggregation_strategy : AGGREGATION_STRATEGY
+├─────────────
+│ aggregated_findings : ℙ ARCHITECTURAL_SMELL
+│ confidence_scores : ARCHITECTURAL_SMELL ⇸ ℝ
+│ false_positive_adjustment : ℝ
+├─────────────
+│ ∀ tool : tools • tool ∈ dom tool_results ∧ tool ∈ dom tool_weights
+│ ∑ {tool_weights(tool) | tool ∈ tools} = 1.0
+│
+│ aggregated_findings = ⋃ {results_to_findings(tool_results(tool)) | tool ∈ tools}
+│
+│ ∀ finding : aggregated_findings •
+│   confidence_scores(finding) = ∑ {tool_weights(tool) × finding_confidence(finding, tool_results(tool))
+│                                  | tool ∈ tools ∧ finding ∈ results_to_findings(tool_results(tool))}
+├─────────────
+│ precision_adjustment ≜ confidence_scores ⊕ false_positive_adjustment
+```
+
+This Z notation formalization provides mathematical rigor to the architectural analysis algorithms discussed in the research, enabling precise specification of detection logic, threshold evaluation, and tool integration patterns.
