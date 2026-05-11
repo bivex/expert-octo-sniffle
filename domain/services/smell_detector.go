@@ -25,6 +25,16 @@ const (
 	SmellTypeChannelSendLeak
 	SmellTypeBlockingBug
 	SmellTypeRaceCondition
+	// Fowler code smells (Chapter 3 - "Code Smells")
+	SmellTypeLongParameterList
+	SmellTypeSwitchStatements
+	SmellTypeMessageChain
+	SmellTypeDataClump
+	SmellTypeFeatureEnvy
+	SmellTypePrimitiveObsession
+	SmellTypeMiddleMan
+	SmellTypeSpeculativeGenerality
+	SmellTypeDuplicatedCode
 )
 
 // String returns a string representation of the smell type
@@ -54,6 +64,25 @@ func (st SmellType) String() string {
 		return "blocking_bug"
 	case SmellTypeRaceCondition:
 		return "race_condition"
+	// Fowler code smells
+	case SmellTypeLongParameterList:
+		return "long_parameter_list"
+	case SmellTypeSwitchStatements:
+		return "switch_statements"
+	case SmellTypeMessageChain:
+		return "message_chain"
+	case SmellTypeDataClump:
+		return "data_clump"
+	case SmellTypeFeatureEnvy:
+		return "feature_envy"
+	case SmellTypePrimitiveObsession:
+		return "primitive_obsession"
+	case SmellTypeMiddleMan:
+		return "middle_man"
+	case SmellTypeSpeculativeGenerality:
+		return "speculative_generality"
+	case SmellTypeDuplicatedCode:
+		return "duplicated_code"
 	default:
 		return "unknown"
 	}
@@ -68,6 +97,7 @@ type SmellDetector interface {
 type ASTSmellDetector struct {
 	goroutineLeakDetector   GoroutineLeakDetector
 	concurrencyBugDetector  ConcurrencyBugDetector
+	fowlerDetector          *FowlerSmellDetector
 }
 
 // NewASTSmellDetector creates a new AST-based smell detector
@@ -75,6 +105,7 @@ func NewASTSmellDetector() *ASTSmellDetector {
 	return &ASTSmellDetector{
 		goroutineLeakDetector:  NewASTGoroutineLeakDetector(),
 		concurrencyBugDetector: NewASTConcurrencyBugDetector(),
+		fowlerDetector:         NewFowlerSmellDetector(),
 	}
 }
 
@@ -105,6 +136,13 @@ func (sd *ASTSmellDetector) DetectSmells(node ast.Node, fset *token.FileSet, con
 	// Detect concurrency bugs
 	if bugFindings, err := sd.concurrencyBugDetector.DetectBugs(node, fset, config); err == nil {
 		findings = append(findings, bugFindings...)
+	}
+
+	// Detect Fowler code smells (Long Parameter List, Switch Statements, Message Chains,
+	// Data Clumps, Feature Envy, Primitive Obsession, Middle Man, Speculative Generality,
+	// Duplicated Code)
+	if fowlerFindings, err := sd.fowlerDetector.Detect(node, fset, config); err == nil {
+		findings = append(findings, fowlerFindings...)
 	}
 
 	return findings, nil
