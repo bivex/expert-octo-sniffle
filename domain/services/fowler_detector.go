@@ -298,15 +298,25 @@ func (d *FowlerSmellDetector) detectFeatureEnvy(node ast.Node, fset *token.FileS
 			return true
 		}
 
-		// Get receiver type name
+		// Get receiver type name and variable name
 		recvType := getReceiverTypeName(fn.Recv.List[0].Type)
 		if recvType == "" {
 			return true
 		}
 
+		// Collect parameter names (non-receiver)
+		paramNames := make(map[string]bool)
+		if fn.Type.Params != nil {
+			for _, field := range fn.Type.Params.List {
+				for _, name := range field.Names {
+					paramNames[name.Name] = true
+				}
+			}
+		}
+
 		// Count own receiver usage vs external usage
 		ownUsage := 0
-		externalUsage := make(map[string]int) // type name -> count
+		externalUsage := make(map[string]int) // var name -> count
 
 		ast.Inspect(fn.Body, func(expr ast.Node) bool {
 			sel, ok := expr.(*ast.SelectorExpr)
@@ -322,25 +332,22 @@ func (d *FowlerSmellDetector) detectFeatureEnvy(node ast.Node, fset *token.FileS
 			// Check if this is a method call or field access on the receiver
 			if ident.Name == recvType || isReceiverName(fn.Recv.List[0], ident.Name) {
 				ownUsage++
-			} else {
-				// External usage — could be another type's method/field
-				typeName := ident.Name
-				if ast.IsExported(typeName) || isLikelyTypeRef(typeName) {
-					externalUsage[typeName]++
-				}
+			} else if paramNames[ident.Name] {
+				// Parameter usage — potential Feature Envy
+				externalUsage[ident.Name]++
 			}
 			return true
 		})
 
 		// If external usage significantly exceeds own usage, it's Feature Envy
 		totalExternal := 0
-		dominantType := ""
+		dominantName := ""
 		dominantCount := 0
 		for t, c := range externalUsage {
 			totalExternal += c
 			if c > dominantCount {
 				dominantCount = c
-				dominantType = t
+				dominantName = t
 			}
 		}
 
@@ -351,9 +358,9 @@ func (d *FowlerSmellDetector) detectFeatureEnvy(node ast.Node, fset *token.FileS
 				fmt.Sprintf("feature_envy_%s_%d", fn.Name.Name, pos.Line),
 				entities.FindingTypeSmell,
 				location,
-				fmt.Sprintf("Method %s uses receiver %s %d times but external type '%s' %d times. "+
+				fmt.Sprintf("Method %s uses receiver %s %d times but parameter '%s' %d times. "+
 					"Fowler: 'Feature Envy' — consider Move Method or Extract Method.",
-					fn.Name.Name, recvType, ownUsage, dominantType, dominantCount),
+					fn.Name.Name, recvType, ownUsage, dominantName, dominantCount),
 				valueobjects.SeverityWarning,
 			)
 			findings = append(findings, finding)
