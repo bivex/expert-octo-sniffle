@@ -35,6 +35,11 @@ const (
 	SmellTypeMiddleMan
 	SmellTypeSpeculativeGenerality
 	SmellTypeDuplicatedCode
+	SmellTypeDivergentChange
+	SmellTypeShotgunSurgery
+	SmellTypeTemporaryField
+	SmellTypeComments
+	SmellTypeRefusedBequest
 )
 
 // String returns a string representation of the smell type
@@ -83,6 +88,16 @@ func (st SmellType) String() string {
 		return "speculative_generality"
 	case SmellTypeDuplicatedCode:
 		return "duplicated_code"
+	case SmellTypeDivergentChange:
+		return "divergent_change"
+	case SmellTypeShotgunSurgery:
+		return "shotgun_surgery"
+	case SmellTypeTemporaryField:
+		return "temporary_field"
+	case SmellTypeComments:
+		return "comments"
+	case SmellTypeRefusedBequest:
+		return "refused_bequest"
 	default:
 		return "unknown"
 	}

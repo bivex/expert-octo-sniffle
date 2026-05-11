@@ -32,6 +32,11 @@ func (d *FowlerSmellDetector) Detect(node ast.Node, fset *token.FileSet, config 
 	findings = append(findings, d.detectMiddleMan(node, fset)...)
 	findings = append(findings, d.detectSpeculativeGenerality(node, fset)...)
 	findings = append(findings, d.detectDuplicatedCode(node, fset)...)
+	findings = append(findings, d.detectDivergentChange(node, fset)...)
+	findings = append(findings, d.detectShotgunSurgery(node, fset)...)
+	findings = append(findings, d.detectTemporaryField(node, fset)...)
+	findings = append(findings, d.detectComments(node, fset)...)
+	findings = append(findings, d.detectRefusedBequest(node, fset)...)
 
 	return findings, nil
 }
@@ -602,7 +607,504 @@ func (d *FowlerSmellDetector) detectDuplicatedCode(node ast.Node, fset *token.Fi
 	return findings
 }
 
+// --- Divergent Change (Fowler p.79) ---
+// "When you want to change one thing, you have to make lots of changes to different classes"
+// Detect: struct where methods access disjoint field groups — the class changes for different reasons
+
+func (d *FowlerSmellDetector) detectDivergentChange(node ast.Node, fset *token.FileSet) []entities.AnalysisFinding {
+	var findings []entities.AnalysisFinding
+
+	type methodAccess struct {
+		name   string
+		fields map[string]bool
+		pos    token.Pos
+	}
+
+	structMethods := make(map[string][]methodAccess)
+
+	ast.Inspect(node, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Body == nil || fn.Recv == nil || len(fn.Recv.List) == 0 {
+			return true
+		}
+		recvType := getReceiverTypeName(fn.Recv.List[0].Type)
+		recvVar := ""
+		if len(fn.Recv.List[0].Names) > 0 {
+			recvVar = fn.Recv.List[0].Names[0].Name
+		}
+		if recvType == "" || recvVar == "" {
+			return true
+		}
+
+		accessed := make(map[string]bool)
+		ast.Inspect(fn.Body, func(expr ast.Node) bool {
+			sel, ok := expr.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			ident, ok := sel.X.(*ast.Ident)
+			if ok && ident.Name == recvVar {
+				accessed[sel.Sel.Name] = true
+			}
+			return true
+		})
+
+		if len(accessed) > 0 {
+			structMethods[recvType] = append(structMethods[recvType], methodAccess{
+				name: fn.Name.Name, fields: accessed, pos: fn.Pos(),
+			})
+		}
+		return true
+	})
+
+	for structName, methods := range structMethods {
+		if len(methods) < 4 {
+			continue
+		}
+		zeroOverlapPairs := 0
+		for i := 0; i < len(methods); i++ {
+			for j := i + 1; j < len(methods); j++ {
+				if !hasOverlap(methods[i].fields, methods[j].fields) {
+					zeroOverlapPairs++
+				}
+			}
+		}
+		if zeroOverlapPairs >= 1 {
+			pos := methods[0].pos
+			location, _ := valueobjects.NewSourceLocation(fset.Position(pos).Filename, fset.Position(pos).Line, 0)
+			finding, _ := entities.NewAnalysisFinding(
+				fmt.Sprintf("divergent_change_%s", structName),
+				entities.FindingTypeSmell,
+				location,
+				fmt.Sprintf("Type %s has %d methods with %d zero-overlap method pairs (methods accessing disjoint field sets). "+
+					"Fowler: 'Divergent Change' - consider Extract Class to separate concerns.",
+					structName, len(methods), zeroOverlapPairs),
+				valueobjects.SeverityWarning,
+			)
+			findings = append(findings, finding)
+		}
+	}
+
+	return findings
+}
+
+func (d *FowlerSmellDetector) detectShotgunSurgery(node ast.Node, fset *token.FileSet) []entities.AnalysisFinding {
+	var findings []entities.AnalysisFinding
+
+	type paramUsage struct {
+		recvTypes map[string]bool
+		funcNames []string
+		pos       token.Pos
+	}
+
+	// Track parameter types and which receiver types use them
+	paramUsageMap := make(map[string]*paramUsage) // param type name -> usage
+
+	ast.Inspect(node, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Type.Params == nil {
+			return true
+		}
+
+		recvType := ""
+		if fn.Recv != nil && len(fn.Recv.List) > 0 {
+			recvType = getReceiverTypeName(fn.Recv.List[0].Type)
+		}
+
+		for _, field := range fn.Type.Params.List {
+			typeName := extractTypeName(field.Type)
+			if typeName == "" || isGoPrimitive(typeName) {
+				continue
+			}
+
+			if paramUsageMap[typeName] == nil {
+				paramUsageMap[typeName] = &paramUsage{
+					recvTypes: make(map[string]bool),
+				}
+			}
+
+			if recvType != "" {
+				paramUsageMap[typeName].recvTypes[recvType] = true
+			}
+			paramUsageMap[typeName].funcNames = append(paramUsageMap[typeName].funcNames, fn.Name.Name)
+			if paramUsageMap[typeName].pos == token.NoPos {
+				paramUsageMap[typeName].pos = fn.Pos()
+			}
+		}
+
+		return true
+	})
+
+	for typeName, usage := range paramUsageMap {
+		// If a type is used across 3+ different receiver types in 5+ functions
+		if len(usage.recvTypes) >= 3 && len(usage.funcNames) >= 5 {
+			pos := usage.pos
+			location, _ := valueobjects.NewSourceLocation(fset.Position(pos).Filename, fset.Position(pos).Line, 0)
+			finding, _ := entities.NewAnalysisFinding(
+				fmt.Sprintf("shotgun_surgery_%s", typeName),
+				entities.FindingTypeSmell,
+				location,
+				fmt.Sprintf("Type %s is passed as parameter to %d functions across %d different receiver types (%v). "+
+					"Fowler: 'Shotgun Surgery' — consider Move Method or Extract Class to collocate.",
+					typeName, len(usage.funcNames), len(usage.recvTypes), mapKeys(usage.recvTypes)),
+				valueobjects.SeverityWarning,
+			)
+			findings = append(findings, finding)
+		}
+	}
+
+	return findings
+}
+
+// --- Temporary Field (Fowler p.84) ---
+// "Instance variables that are set only in certain circumstances"
+// Detect: struct fields that are accessed only in a small subset of methods
+
+func (d *FowlerSmellDetector) detectTemporaryField(node ast.Node, fset *token.FileSet) []entities.AnalysisFinding {
+	var findings []entities.AnalysisFinding
+
+	// Collect struct definitions with their field names
+	structFields := make(map[string][]string) // struct name -> field names
+	var structPositions []struct {
+		name string
+		pos  token.Pos
+	}
+
+	ast.Inspect(node, func(n ast.Node) bool {
+		genDecl, ok := n.(*ast.GenDecl)
+		if !ok {
+			return true
+		}
+		for _, spec := range genDecl.Specs {
+			typeSpec, ok := spec.(*ast.TypeSpec)
+			if !ok {
+				continue
+			}
+			structType, ok := typeSpec.Type.(*ast.StructType)
+			if !ok || structType.Fields == nil {
+				continue
+			}
+
+			var fields []string
+			for _, f := range structType.Fields.List {
+				for _, name := range f.Names {
+					fields = append(fields, name.Name)
+				}
+			}
+			if len(fields) >= 4 {
+				structFields[typeSpec.Name.Name] = fields
+				structPositions = append(structPositions, struct {
+					name string
+					pos  token.Pos
+				}{typeSpec.Name.Name, typeSpec.Pos()})
+			}
+		}
+		return true
+	})
+
+	// For each struct, track which fields are accessed in which methods
+	type fieldUsage struct {
+		fieldName  string
+		methods    []string
+	}
+
+	for structName, fields := range structFields {
+		methodCount := 0
+		fieldAccessCount := make(map[string][]string) // field -> methods that access it
+
+		ast.Inspect(node, func(n ast.Node) bool {
+			fn, ok := n.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || fn.Recv == nil || len(fn.Recv.List) == 0 {
+				return true
+			}
+
+			recvType := getReceiverTypeName(fn.Recv.List[0].Type)
+			if recvType != structName {
+				return true
+			}
+
+			methodCount++
+			recvVar := ""
+			if len(fn.Recv.List[0].Names) > 0 {
+				recvVar = fn.Recv.List[0].Names[0].Name
+			}
+
+			ast.Inspect(fn.Body, func(expr ast.Node) bool {
+				sel, ok := expr.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				ident, ok := sel.X.(*ast.Ident)
+				if ok && ident.Name == recvVar {
+					for _, f := range fields {
+						if sel.Sel.Name == f {
+							fieldAccessCount[f] = append(fieldAccessCount[f], fn.Name.Name)
+						}
+					}
+				}
+				return true
+			})
+			return true
+		})
+
+		if methodCount < 4 {
+			continue
+		}
+
+		// Find fields accessed by <=1 methods
+		for _, fieldName := range fields {
+			methods := fieldAccessCount[fieldName]
+			if len(methods) <= 1 {
+				// Find struct position for reporting
+				for _, sp := range structPositions {
+					if sp.name == structName {
+						pos := sp.pos
+						location, _ := valueobjects.NewSourceLocation(fset.Position(pos).Filename, fset.Position(pos).Line, 0)
+						methodStr := "no methods"
+						if len(methods) == 1 {
+							methodStr = fmt.Sprintf("only method %s", methods[0])
+						}
+						finding, _ := entities.NewAnalysisFinding(
+							fmt.Sprintf("temporary_field_%s_%s", structName, fieldName),
+							entities.FindingTypeSmell,
+							location,
+							fmt.Sprintf("Field %s.%s is accessed in %s out of %d methods. "+
+								"Fowler: 'Temporary Field' — consider Extract Class or Move Field.",
+								structName, fieldName, methodStr, methodCount),
+							valueobjects.SeverityInfo,
+						)
+						findings = append(findings, finding)
+						break
+					}
+				}
+			}
+		}
+	}
+
+	return findings
+}
+
+// --- Comments (Fowler p.86) ---
+// "When you feel the need to write a comment, first try to refactor the code so that any comment becomes superfluous"
+// Detect: functions with excessive comment-to-code ratio
+
+func (d *FowlerSmellDetector) detectComments(node ast.Node, fset *token.FileSet) []entities.AnalysisFinding {
+	var findings []entities.AnalysisFinding
+
+	ast.Inspect(node, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			return true
+		}
+
+		startPos := fset.Position(fn.Body.Lbrace)
+		endPos := fset.Position(fn.Body.Rbrace)
+		codeLines := endPos.Line - startPos.Line
+		if codeLines < 10 {
+			return true
+		}
+
+		commentLines := 0
+		if file, ok := node.(*ast.File); ok {
+			for _, cg := range file.Comments {
+				for _, c := range cg.List {
+					cpos := fset.Position(c.Pos())
+					if cpos.Line > startPos.Line && cpos.Line < endPos.Line {
+						if len(c.Text) >= 2 && c.Text[0:2] == "/*" {
+							commentLines += countLines(c.Text)
+						} else {
+							commentLines++
+						}
+					}
+				}
+			}
+		}
+
+		if commentLines > 0 && float64(commentLines)/float64(codeLines) > 0.4 {
+			pos := fset.Position(fn.Pos())
+			location, _ := valueobjects.NewSourceLocation(pos.Filename, pos.Line, pos.Column)
+			finding, _ := entities.NewAnalysisFinding(
+				fmt.Sprintf("comments_%s_%d", fn.Name.Name, pos.Line),
+				entities.FindingTypeSmell,
+				location,
+				fmt.Sprintf("Function %s has %d comment lines out of %d total (%.0f%%). "+
+					"Fowler: 'Comments' — excessive comments often indicate code that needs refactoring. "+
+					"Consider Extract Method or Rename to make code self-documenting.",
+					fn.Name.Name, commentLines, codeLines, float64(commentLines)/float64(codeLines)*100),
+				valueobjects.SeverityInfo,
+			)
+			findings = append(findings, finding)
+		}
+
+		return true
+	})
+
+	return findings
+}
+
+func (d *FowlerSmellDetector) detectRefusedBequest(node ast.Node, fset *token.FileSet) []entities.AnalysisFinding {
+	var findings []entities.AnalysisFinding
+
+	// Collect all methods by receiver type
+	methodsByType := make(map[string]map[string]bool) // type -> {method name: true}
+	ast.Inspect(node, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Recv == nil || len(fn.Recv.List) == 0 {
+			return true
+		}
+		recvType := getReceiverTypeName(fn.Recv.List[0].Type)
+		if methodsByType[recvType] == nil {
+			methodsByType[recvType] = make(map[string]bool)
+		}
+		methodsByType[recvType][fn.Name.Name] = true
+		return true
+	})
+
+	// Find structs with embedded types
+	type embedInfo struct {
+		parentType   string
+		embeddedType string
+		pos          token.Pos
+	}
+	var embeddings []embedInfo
+
+	ast.Inspect(node, func(n ast.Node) bool {
+		genDecl, ok := n.(*ast.GenDecl)
+		if !ok {
+			return true
+		}
+		for _, spec := range genDecl.Specs {
+			typeSpec, ok := spec.(*ast.TypeSpec)
+			if !ok {
+				continue
+			}
+			structType, ok := typeSpec.Type.(*ast.StructType)
+			if !ok || structType.Fields == nil {
+				continue
+			}
+			for _, f := range structType.Fields.List {
+				// Anonymous (embedded) field — no names, just a type
+				if len(f.Names) == 0 {
+					embeddedName := extractTypeName(f.Type)
+					if embeddedName != "" && embeddedName != typeSpec.Name.Name {
+						embeddings = append(embeddings, embedInfo{
+							parentType:   typeSpec.Name.Name,
+							embeddedType: embeddedName,
+							pos:          typeSpec.Pos(),
+						})
+					}
+				}
+			}
+		}
+		return true
+	})
+
+	// For each embedding, check how many inherited methods are actually used
+	for _, emb := range embeddings {
+		inheritedMethods := methodsByType[emb.embeddedType]
+		if len(inheritedMethods) < 3 {
+			continue
+		}
+
+		// Check which inherited methods are called on the parent type
+		usedCount := 0
+		for method := range inheritedMethods {
+			// Check if parent type or any code calls parentType.method()
+			used := false
+			ast.Inspect(node, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				if sel.Sel.Name == method {
+					// Check if called on a variable of parentType
+					if ident, ok := sel.X.(*ast.Ident); ok {
+						if isLikelyTypeRef(ident.Name) || ident.Name == strings.ToLower(emb.parentType[:1]) {
+							used = true
+							return false
+						}
+					}
+				}
+				return true
+			})
+			if used {
+				usedCount++
+			}
+		}
+
+		// If less than 30% of inherited methods are used, flag it
+		usageRatio := float64(usedCount) / float64(len(inheritedMethods))
+		if usageRatio < 0.3 {
+			pos := emb.pos
+			location, _ := valueobjects.NewSourceLocation(fset.Position(pos).Filename, fset.Position(pos).Line, 0)
+			finding, _ := entities.NewAnalysisFinding(
+				fmt.Sprintf("refused_bequest_%s_%s", emb.parentType, emb.embeddedType),
+				entities.FindingTypeSmell,
+				location,
+				fmt.Sprintf("Type %s embeds %s (%d methods) but only uses %d of them (%.0f%%). "+
+					"Fowler: 'Refused Bequest' — consider Replace Inheritance with Delegation "+
+					"or extract the used methods into a smaller interface.",
+					emb.parentType, emb.embeddedType, len(inheritedMethods), usedCount, usageRatio*100),
+				valueobjects.SeverityWarning,
+			)
+			findings = append(findings, finding)
+		}
+	}
+
+	return findings
+}
+
 // ======== Helper functions ========
+
+// extractTypeName gets the base type name from an AST expression
+func extractTypeName(t ast.Expr) string {
+	switch v := t.(type) {
+	case *ast.Ident:
+		return v.Name
+	case *ast.StarExpr:
+		return extractTypeName(v.X)
+	case *ast.SelectorExpr:
+		return v.Sel.Name
+	case *ast.ArrayType:
+		return extractTypeName(v.Elt)
+	}
+	return ""
+}
+
+// isGoPrimitive checks if a type name is a Go primitive
+func isGoPrimitive(name string) bool {
+	prims := map[string]bool{
+		"string": true, "int": true, "int8": true, "int16": true, "int32": true, "int64": true,
+		"uint": true, "uint8": true, "uint16": true, "uint32": true, "uint64": true,
+		"float32": true, "float64": true, "bool": true, "byte": true, "rune": true,
+		"error": true,
+	}
+	return prims[name]
+}
+
+// mapKeys returns the keys of a map[string]bool as a slice
+func mapKeys(m map[string]bool) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// countLines counts the number of newlines in a string
+func countLines(s string) int {
+	n := 0
+	for _, c := range s {
+		if c == '\n' {
+			n++
+		}
+	}
+	return n + 1
+}
 
 // countFields counts the actual number of parameters (names in each field)
 func countFields(fields []*ast.Field) int {
@@ -1067,4 +1569,14 @@ func longestCommonSubsequence(a, b []string) int {
 	}
 
 	return dp[m][n]
+}
+
+// hasOverlap checks if two field sets share any fields
+func hasOverlap(a, b map[string]bool) bool {
+	for k := range a {
+		if b[k] {
+			return true
+		}
+	}
+	return false
 }
